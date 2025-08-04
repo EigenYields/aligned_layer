@@ -13,9 +13,11 @@ use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tokio::join;
+use tokio::sync::Semaphore;
 use tokio_tungstenite::connect_async;
 
 use crate::structs::{
@@ -322,13 +324,15 @@ async fn run_infinite_proof_sender(
     max_fee: U256,
     random_address: bool,
 ) {
-    info!("Initializing {} sender tasks", senders.len());
+    info!("Initializing {} sender tasks with semaphore limit of 20 concurrent connections", senders.len());
+    let semaphore = Arc::new(Semaphore::new(20)); // Max 20 concurrent connections
     let mut handles = vec![];
 
     for (i, sender) in senders.iter().enumerate() {
         let wallet = sender.wallet.clone();
         let verification_data = verification_data.clone();
         let network_clone = network.clone();
+        let semaphore_clone = semaphore.clone();
 
         info!(
             "Starting sender task {} with wallet address {:?}",
@@ -347,6 +351,11 @@ async fn run_infinite_proof_sender(
                     i, loop_iteration, burst_size, burst_time_secs
                 );
 
+                // Acquire semaphore permit before connecting to batcher
+                info!("Sender {} waiting for semaphore permit...", i);
+                let _permit = semaphore_clone.acquire().await.unwrap();
+                info!("Sender {} acquired semaphore permit, proceeding with submission", i);
+
                 let n = network_clone.clone();
                 let mut result = Vec::with_capacity(burst_size);
 
@@ -363,9 +372,11 @@ async fn run_infinite_proof_sender(
                     }
                     Err(e) => {
                         error!(
-                            "Sender {} could not get nonce: {:?}, for address {:?} - retrying in 5s",
+                            "Sender {} could not get nonce: {:?}, for address {:?} - releasing permit and retrying in 5s",
                             i, e, wallet.address()
                         );
+                        drop(_permit);
+                        info!("Sender {} released semaphore permit due to nonce error", i);
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
@@ -441,6 +452,10 @@ async fn run_infinite_proof_sender(
                     "Sender {} iteration {} COMPLETE: {} successes, {} errors in {:?}. Sleeping {}s",
                     i, loop_iteration, success_count, error_count, submit_duration, burst_time_secs
                 );
+
+                // Permit is automatically dropped here, releasing the semaphore slot
+                drop(_permit);
+                info!("Sender {} released semaphore permit", i);
 
                 tokio::time::sleep(Duration::from_secs(burst_time_secs)).await;
                 info!("Sender {} woke up from sleep, starting next iteration", i);
