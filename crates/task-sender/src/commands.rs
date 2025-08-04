@@ -292,12 +292,10 @@ async fn load_senders_from_file(
             continue;
         }
 
-        info!("Processing private key from line {}", line_count);
         let wallet = Wallet::from_str(trimmed_key)
             .map_err(|e| format!("Invalid private key on line {}: {:?}", line_count, e))?
             .with_chain_id(chain_id.as_u64());
         
-        info!("Created wallet {} with address: {:?}", senders.len(), wallet.address());
         let sender = Sender { wallet };
         senders.push(sender);
     }
@@ -402,6 +400,8 @@ async fn run_infinite_proof_sender(
                 );
 
                 let start_time = std::time::Instant::now();
+                info!("Sender {} calling submit_multiple - waiting for batcher response...", i);
+                
                 let aligned_verification_data = submit_multiple(
                     n,
                     &verification_data_to_send.clone(),
@@ -411,9 +411,10 @@ async fn run_infinite_proof_sender(
                 )
                 .await;
                 let submit_duration = start_time.elapsed();
+                info!("Sender {} submit_multiple call completed after {:?}", i, submit_duration);
 
                 info!(
-                    "Sender {} completed submission in {:?}, processing {} responses",
+                    "Sender {} submit_multiple returned after {:?}, processing {} responses",
                     i, submit_duration, aligned_verification_data.len()
                 );
 
@@ -422,14 +423,14 @@ async fn run_infinite_proof_sender(
 
                 for (idx, aligned_verification_data) in aligned_verification_data.iter().enumerate() {
                     match aligned_verification_data {
-                        Ok(_) => {
+                        Ok(response) => {
                             success_count += 1;
-                            debug!("Sender {} response {} received successfully", i, idx);
+                            info!("Sender {} response {} SUCCESS: {:?}", i, idx, response);
                         }
                         Err(e) => {
                             error_count += 1;
                             error!(
-                                "Sender {} error in response {}: {:?}",
+                                "Sender {} response {} ERROR: {:?}",
                                 i, idx, e
                             );
                         }
@@ -437,8 +438,8 @@ async fn run_infinite_proof_sender(
                 }
 
                 info!(
-                    "Sender {} completed iteration {}: {} successes, {} errors. Sleeping for {}s",
-                    i, loop_iteration, success_count, error_count, burst_time_secs
+                    "Sender {} iteration {} COMPLETE: {} successes, {} errors in {:?}. Sleeping {}s",
+                    i, loop_iteration, success_count, error_count, submit_duration, burst_time_secs
                 );
 
                 tokio::time::sleep(Duration::from_secs(burst_time_secs)).await;
@@ -479,9 +480,6 @@ pub async fn send_infinite_proofs(args: SendInfiniteProofsArgs) {
     {
         Ok(senders) => {
             info!("Successfully loaded {} wallets", senders.len());
-            for (i, sender) in senders.iter().enumerate() {
-                info!("  Wallet {}: {:?}", i, sender.wallet.address());
-            }
             senders
         }
         Err(err) => {
