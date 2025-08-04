@@ -116,7 +116,7 @@ pub struct SendInfiniteProofsArgs {
         default_value = "3"
     )]
     pub burst_time_secs: u64,
-    #[arg(name = "Max Fee", long = "max-fee", default_value = "1300000000000000")]
+    #[arg(name = "Max Fee", long = "max-fee", default_value = "30000000000")]
     pub max_fee: String,
     #[clap(flatten)]
     pub network: NetworkArg,
