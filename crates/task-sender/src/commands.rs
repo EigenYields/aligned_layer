@@ -257,33 +257,61 @@ async fn load_senders_from_file(
     eth_rpc_url: &str,
     private_keys_filepath: &str,
 ) -> Result<Vec<Sender>, String> {
+    info!("Connecting to ETH RPC at: {}", eth_rpc_url);
     let eth_rpc_provider = Provider::<Http>::try_from(eth_rpc_url)
-        .map_err(|_| "Could not connect to eth rpc".to_string())?;
+        .map_err(|e| format!("Could not connect to eth rpc '{}': {:?}", eth_rpc_url, e))?;
+    
+    info!("Getting chain ID from RPC");
     let chain_id = eth_rpc_provider
         .get_chainid()
         .await
-        .map_err(|_| "Could not get chain id".to_string())?;
+        .map_err(|e| format!("Could not get chain id: {:?}", e))?;
+    info!("Connected to chain ID: {}", chain_id);
 
+    info!("Opening private keys file: {}", private_keys_filepath);
     let file = File::open(private_keys_filepath)
-        .map_err(|err| format!("Could not open private keys file: {}", err))?;
+        .map_err(|err| format!("Could not open private keys file '{}': {}", private_keys_filepath, err))?;
 
     let reader = BufReader::new(file);
     let mut senders = vec![];
+    let mut line_count = 0;
 
+    info!("Reading private keys from file");
     for line in reader.lines() {
-        let private_key_str =
-            line.map_err(|err| format!("Could not read line from private keys file: {}", err))?;
-        let wallet = Wallet::from_str(private_key_str.trim())
-            .map_err(|_| "Invalid private key".to_string())?
+        line_count += 1;
+        let private_key_str = line.map_err(|err| {
+            format!(
+                "Could not read line {} from private keys file: {}",
+                line_count, err
+            )
+        })?;
+        
+        let trimmed_key = private_key_str.trim();
+        if trimmed_key.is_empty() {
+            info!("Skipping empty line {}", line_count);
+            continue;
+        }
+
+        info!("Processing private key from line {}", line_count);
+        let wallet = Wallet::from_str(trimmed_key)
+            .map_err(|e| format!("Invalid private key on line {}: {:?}", line_count, e))?
             .with_chain_id(chain_id.as_u64());
+        
+        info!("Created wallet {} with address: {:?}", senders.len(), wallet.address());
         let sender = Sender { wallet };
         senders.push(sender);
     }
 
+    info!("Processed {} lines from private keys file", line_count);
+
     if senders.is_empty() {
-        return Err("No wallets in file".to_string());
+        return Err(format!(
+            "No wallets loaded from file '{}' (processed {} lines)", 
+            private_keys_filepath, line_count
+        ));
     }
 
+    info!("Successfully loaded {} wallets from file", senders.len());
     Ok(senders)
 }
 
@@ -296,6 +324,7 @@ async fn run_infinite_proof_sender(
     max_fee: U256,
     random_address: bool,
 ) {
+    info!("Initializing {} sender tasks", senders.len());
     let mut handles = vec![];
 
     for (i, sender) in senders.iter().enumerate() {
@@ -303,23 +332,57 @@ async fn run_infinite_proof_sender(
         let verification_data = verification_data.clone();
         let network_clone = network.clone();
 
+        info!(
+            "Starting sender task {} with wallet address {:?}",
+            i,
+            wallet.address()
+        );
+
         let handle = tokio::spawn(async move {
+            info!("Sender {} task started, entering main loop", i);
+            let mut loop_iteration = 0;
+            
             loop {
+                loop_iteration += 1;
+                info!(
+                    "Sender {} starting loop iteration {} (burst_size: {}, burst_time: {}s)",
+                    i, loop_iteration, burst_size, burst_time_secs
+                );
+
                 let n = network_clone.clone();
                 let mut result = Vec::with_capacity(burst_size);
-                let nonce = get_nonce_from_batcher(n.clone(), wallet.address())
-                    .await
-                    .inspect_err(|e| {
+
+                info!(
+                    "Sender {} fetching nonce from batcher for address {:?}",
+                    i,
+                    wallet.address()
+                );
+
+                let nonce = match get_nonce_from_batcher(n.clone(), wallet.address()).await {
+                    Ok(nonce) => {
+                        info!("Sender {} received nonce: {}", i, nonce);
+                        nonce
+                    }
+                    Err(e) => {
                         error!(
-                            "Could not get nonce: {:?}, for sender {:?}",
-                            e,
-                            wallet.address()
-                        )
-                    })
-                    .unwrap();
+                            "Sender {} could not get nonce: {:?}, for address {:?} - retrying in 5s",
+                            i, e, wallet.address()
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+
+                info!(
+                    "Sender {} preparing {} verification data samples",
+                    i, burst_size
+                );
+
                 while result.len() < burst_size {
+                    let remaining = burst_size - result.len();
                     let samples = verification_data
-                        .choose_multiple(&mut thread_rng(), burst_size - result.len());
+                        .choose_multiple(&mut thread_rng(), remaining);
+                    
                     for mut sample in samples.cloned() {
                         // Randomize proof generator address if requested
                         if random_address {
@@ -334,10 +397,11 @@ async fn run_infinite_proof_sender(
                 let verification_data_to_send = result;
 
                 info!(
-                    "Sending {:?} Proofs to Aligned Batcher on {:?} from sender {}, nonce: {}, address: {:?}",
-                    burst_size, n, i, nonce, wallet.address(),
+                    "Sender {} submitting {} proofs to Aligned Batcher on {:?}, nonce: {}, address: {:?}",
+                    i, burst_size, n, nonce, wallet.address()
                 );
 
+                let start_time = std::time::Instant::now();
                 let aligned_verification_data = submit_multiple(
                     n,
                     &verification_data_to_send.clone(),
@@ -346,56 +410,92 @@ async fn run_infinite_proof_sender(
                     nonce,
                 )
                 .await;
+                let submit_duration = start_time.elapsed();
 
-                for aligned_verification_data in aligned_verification_data {
+                info!(
+                    "Sender {} completed submission in {:?}, processing {} responses",
+                    i, submit_duration, aligned_verification_data.len()
+                );
+
+                let mut success_count = 0;
+                let mut error_count = 0;
+
+                for (idx, aligned_verification_data) in aligned_verification_data.iter().enumerate() {
                     match aligned_verification_data {
                         Ok(_) => {
-                            debug!("Response received for sender {}", i);
+                            success_count += 1;
+                            debug!("Sender {} response {} received successfully", i, idx);
                         }
                         Err(e) => {
+                            error_count += 1;
                             error!(
-                                "Error submitting proofs to aligned: {:?} from sender {}",
-                                e, i
+                                "Sender {} error in response {}: {:?}",
+                                i, idx, e
                             );
                         }
                     }
                 }
-                info!("All responses received for sender {}", i);
+
+                info!(
+                    "Sender {} completed iteration {}: {} successes, {} errors. Sleeping for {}s",
+                    i, loop_iteration, success_count, error_count, burst_time_secs
+                );
 
                 tokio::time::sleep(Duration::from_secs(burst_time_secs)).await;
+                info!("Sender {} woke up from sleep, starting next iteration", i);
             }
         });
 
         handles.push(handle);
+        info!("Sender task {} spawned successfully", i);
     }
 
-    for handle in handles {
+    info!("All {} sender tasks spawned, waiting for completion", senders.len());
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        info!("Waiting for sender task {} to complete", i);
         let _ = join!(handle);
     }
 }
 
 pub async fn send_infinite_proofs(args: SendInfiniteProofsArgs) {
+    info!("Starting infinite proof sender with configuration:");
+    info!("  - Network: {:?}", args.network);
+    info!("  - Private keys file: {}", args.private_keys_filepath);
+    info!("  - Burst size: {}", args.burst_size);
+    info!("  - Burst time: {} seconds", args.burst_time_secs);
+    info!("  - Max fee: {}", args.max_fee);
+    info!("  - Random address: {}", args.random_address);
+    info!("  - ETH RPC URL: {}", args.eth_rpc_url);
+
     if matches!(args.network.clone().into(), Network::Holesky) {
         error!("Network not supported this infinite proof sender");
         return;
     }
 
     // Load wallets using shared function
-    info!("Loading wallets");
+    info!("Loading wallets from file: {}", args.private_keys_filepath);
     let senders = match load_senders_from_file(&args.eth_rpc_url, &args.private_keys_filepath).await
     {
-        Ok(senders) => senders,
+        Ok(senders) => {
+            info!("Successfully loaded {} wallets", senders.len());
+            for (i, sender) in senders.iter().enumerate() {
+                info!("  Wallet {}: {:?}", i, sender.wallet.address());
+            }
+            senders
+        }
         Err(err) => {
-            error!("{}", err);
+            error!("Failed to load wallets: {}", err);
             return;
         }
     };
-    info!("All wallets loaded");
+    info!("All wallets loaded successfully");
 
     // Load verification data based on proof type
+    info!("Loading verification data for proof type: {:?}", args.proof_type);
     let verification_data = match &args.proof_type {
         InfiniteProofType::GnarkGroth16 { proofs_dir } => {
-            info!("Loading Groth16 proofs from directory structure");
+            info!("Loading Groth16 proofs from directory: {}", proofs_dir);
             let data = get_verification_data_from_proofs_folder(
                 proofs_dir.clone(),
                 senders[0].wallet.address(),
@@ -404,6 +504,7 @@ pub async fn send_infinite_proofs(args: SendInfiniteProofsArgs) {
                 error!("Verification data empty, not continuing");
                 return;
             }
+            info!("Loaded {} Groth16 verification data entries", data.len());
             data
         }
         InfiniteProofType::Risc0 {
@@ -411,9 +512,15 @@ pub async fn send_infinite_proofs(args: SendInfiniteProofsArgs) {
             bin_path,
             pub_path,
         } => {
-            info!("Loading RISC Zero proof files");
+            info!("Loading RISC Zero proof files:");
+            info!("  - Proof path: {}", proof_path);
+            info!("  - Binary path: {}", bin_path);
+            info!("  - Public input path: {:?}", pub_path);
             match load_risc0_verification_data(proof_path, bin_path, pub_path) {
-                Ok(data) => data,
+                Ok(data) => {
+                    info!("Successfully loaded RISC Zero verification data");
+                    data
+                }
                 Err(err) => {
                     error!("Failed to load RISC Zero files: {}", err);
                     return;
@@ -425,9 +532,15 @@ pub async fn send_infinite_proofs(args: SendInfiniteProofsArgs) {
             elf_path,
             pub_path,
         } => {
-            info!("Loading SP1 proof files");
+            info!("Loading SP1 proof files:");
+            info!("  - Proof path: {}", proof_path);
+            info!("  - ELF path: {}", elf_path);
+            info!("  - Public input path: {:?}", pub_path);
             match load_sp1_verification_data(proof_path, elf_path, pub_path) {
-                Ok(data) => data,
+                Ok(data) => {
+                    info!("Successfully loaded SP1 verification data");
+                    data
+                }
                 Err(err) => {
                     error!("Failed to load SP1 files: {}", err);
                     return;
@@ -436,12 +549,24 @@ pub async fn send_infinite_proofs(args: SendInfiniteProofsArgs) {
         }
     };
 
-    info!("Proofs loaded!");
+    info!("Proofs loaded! {} verification data entries ready", verification_data.len());
 
-    let max_fee = U256::from_dec_str(&args.max_fee).expect("Invalid max fee");
+    let max_fee = match U256::from_dec_str(&args.max_fee) {
+        Ok(fee) => {
+            info!("Parsed max fee: {} wei", fee);
+            fee
+        }
+        Err(e) => {
+            error!("Invalid max fee '{}': {}", args.max_fee, e);
+            return;
+        }
+    };
+
     let network: Network = args.network.into();
+    info!("Network configuration: {:?}", network);
+    info!("Batcher URL: {}", network.get_batcher_url());
 
-    info!("Starting senders!");
+    info!("Starting infinite proof sender with {} senders!", senders.len());
     run_infinite_proof_sender(
         senders,
         verification_data,
