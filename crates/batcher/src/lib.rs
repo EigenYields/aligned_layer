@@ -563,8 +563,11 @@ impl Batcher {
         }
 
         let cached_user_nonce = {
+            info!("[LOCK] get_nonce_for_address: Acquiring batch_state lock (short - cache check) for address {:?}", address);
             let batch_state_lock = self.batch_state.lock().await;
-            batch_state_lock.get_user_nonce(&address).await
+            let result = batch_state_lock.get_user_nonce(&address).await;
+            info!("[LOCK] get_nonce_for_address: Released batch_state lock (short - cache check) for address {:?}", address);
+            result
         };
 
         let user_nonce = if let Some(user_nonce) = cached_user_nonce {
@@ -717,8 +720,10 @@ impl Batcher {
 
         let is_user_in_state: bool;
         {
+            info!("[LOCK] handle_submit_proof: Acquiring batch_state lock (short - user presence check) for address {:?}", addr);
             let batch_state_lock = self.batch_state.lock().await;
             is_user_in_state = batch_state_lock.user_states.contains_key(&addr);
+            info!("[LOCK] handle_submit_proof: Released batch_state lock (short - user presence check) for address {:?}", addr);
         }
 
         if !is_user_in_state {
@@ -738,11 +743,13 @@ impl Batcher {
                 }
             };
             let user_state = UserState::new(ethereum_user_nonce);
+            info!("[LOCK] handle_submit_proof: Acquiring batch_state lock (short - user state insert) for address {:?}", addr);
             let mut batch_state_lock = self.batch_state.lock().await;
             batch_state_lock
                 .user_states
                 .entry(addr)
                 .or_insert(user_state);
+            info!("[LOCK] handle_submit_proof: Released batch_state lock (short - user state insert) for address {:?}", addr);
         }
 
         // * ---------------------------------------------------*
@@ -764,12 +771,15 @@ impl Batcher {
         // This is needed because we need to query the user state to make validations and
         // finally add the proof to the batch queue.
 
+        info!("[LOCK] handle_submit_proof: Acquiring batch_state lock (LONG - message processing) for address {:?}", addr);
         let mut batch_state_lock = self.batch_state.lock().await;
+        info!("[LOCK] handle_submit_proof: Acquired batch_state lock (LONG - message processing) for address {:?}", addr);
 
         let msg_max_fee = nonced_verification_data.max_fee;
         let Some(user_last_max_fee_limit) =
             batch_state_lock.get_user_last_max_fee_limit(&addr).await
         else {
+            info!("[LOCK] handle_submit_proof: Releasing batch_state lock (LONG - early exit: max_fee_limit error) for address {:?}", addr);
             std::mem::drop(batch_state_lock);
             send_message(
                 ws_conn_sink.clone(),
@@ -782,6 +792,7 @@ impl Batcher {
 
         let Some(user_accumulated_fee) = batch_state_lock.get_user_total_fees_in_queue(&addr).await
         else {
+            info!("[LOCK] handle_submit_proof: Releasing batch_state lock (LONG - early exit: user_accumulated_fee error) for address {:?}", addr);
             std::mem::drop(batch_state_lock);
             send_message(
                 ws_conn_sink.clone(),
@@ -793,6 +804,7 @@ impl Batcher {
         };
 
         if !self.verify_user_has_enough_balance(user_balance, user_accumulated_fee, msg_max_fee) {
+            info!("[LOCK] handle_submit_proof: Releasing batch_state lock (LONG - early exit: insufficient_balance) for address {:?}", addr);
             std::mem::drop(batch_state_lock);
             send_message(
                 ws_conn_sink.clone(),
@@ -807,6 +819,7 @@ impl Batcher {
 
         let Some(expected_nonce) = cached_user_nonce else {
             error!("Failed to get cached user nonce: User not found in user states, but it should have been already inserted");
+            info!("[LOCK] handle_submit_proof: Releasing batch_state lock (LONG - early exit: cached_user_nonce error) for address {:?}", addr);
             std::mem::drop(batch_state_lock);
             send_message(
                 ws_conn_sink.clone(),
@@ -818,6 +831,7 @@ impl Batcher {
         };
 
         if expected_nonce < msg_nonce {
+            info!("[LOCK] handle_submit_proof: Releasing batch_state lock (LONG - early exit: invalid_nonce future) for address {:?}", addr);
             std::mem::drop(batch_state_lock);
             warn!("Invalid nonce for address {addr}, expected nonce: {expected_nonce:?}, received nonce: {msg_nonce:?}");
             send_message(
@@ -945,8 +959,11 @@ impl Batcher {
     }
 
     async fn is_verifier_disabled(&self, verifier: ProvingSystemId) -> bool {
+        info!("[LOCK] is_verifier_disabled: Acquiring disabled_verifiers lock (short - verifier check) for {:?}", verifier);
         let disabled_verifiers = self.disabled_verifiers.lock().await;
-        zk_utils::is_verifier_disabled(*disabled_verifiers, verifier)
+        let result = zk_utils::is_verifier_disabled(*disabled_verifiers, verifier);
+        info!("[LOCK] is_verifier_disabled: Released disabled_verifiers lock (short - verifier check) for {:?}", verifier);
+        result
     }
 
     // Verifies user has enough balance for paying all his proofs in the current batch.
@@ -1137,6 +1154,7 @@ impl Batcher {
         proof_submitter_sig: Signature,
         proof_submitter_addr: Address,
     ) -> Result<(), BatcherError> {
+        info!("[LOCK] add_to_batch: Received batch_state lock (LONG - processing add_to_batch) for address {:?}", proof_submitter_addr);
         info!("Calculating verification data commitments...");
         let verification_data_comm = verification_data.clone().into();
         info!("Adding verification data to batch...");
@@ -1196,12 +1214,15 @@ impl Batcher {
             .is_none()
         {
             error!("User state of address {proof_submitter_addr} was not found when trying to update user state. This user state should have been present");
+            info!("[LOCK] add_to_batch: Releasing batch_state lock (LONG - early exit: user_state update error) for address {:?}", proof_submitter_addr);
             std::mem::drop(batch_state_lock);
             return Err(BatcherError::AddressNotFoundInUserStates(
                 proof_submitter_addr,
             ));
         };
 
+        info!("[LOCK] add_to_batch: Releasing batch_state lock (LONG - completed successfully) for address {:?}", proof_submitter_addr);
+        // Lock is automatically released when MutexGuard goes out of scope
         Ok(())
     }
 
@@ -1225,8 +1246,10 @@ impl Batcher {
         block_number: u64,
         gas_price: U256,
     ) -> Option<Vec<BatchQueueEntry>> {
+        info!("[LOCK] is_batch_ready: Acquiring batch_state lock (short - batch ready check) for block {}", block_number);
         let batch_state_lock = self.batch_state.lock().await;
         let current_batch_len = batch_state_lock.batch_queue.len();
+        info!("[LOCK] is_batch_ready: Acquiring last_uploaded_batch_block lock for block {}", block_number);
         let last_uploaded_batch_block_lock = self.last_uploaded_batch_block.lock().await;
 
         if current_batch_len < 1 {
@@ -1234,6 +1257,7 @@ impl Batcher {
                 "Current batch has {} proofs. Waiting for more proofs...",
                 current_batch_len
             );
+            info!("[LOCK] is_batch_ready: Releasing locks (early exit: not enough proofs) for block {}", block_number);
             return None;
         }
 
@@ -1242,19 +1266,23 @@ impl Batcher {
                 "Current batch not ready to be posted. Minimium amount of {} blocks have not passed. Block passed: {}", self.min_block_interval,
                 block_number - *last_uploaded_batch_block_lock,
             );
+            info!("[LOCK] is_batch_ready: Releasing locks (early exit: block interval not met) for block {}", block_number);
             return None;
         }
 
         // Check if a batch is currently being posted
+        info!("[LOCK] is_batch_ready: Acquiring posting_batch lock for block {}", block_number);
         let mut batch_posting = self.posting_batch.lock().await;
         if *batch_posting {
             info!(
                 "Batch is currently being posted. Waiting for the current batch to be finalized..."
             );
+            info!("[LOCK] is_batch_ready: Releasing locks (early exit: batch already posting) for block {}", block_number);
             return None;
         }
 
         // Set the batch posting flag to true
+        info!("[LOCK] is_batch_ready: Setting posting_batch flag to true for block {}", block_number);
         *batch_posting = true;
         let batch_queue_copy = batch_state_lock.batch_queue.clone();
         let finalized_batch = batch_queue::try_build_batch(
@@ -1382,11 +1410,12 @@ impl Batcher {
             })?;
 
         {
+            info!("[LOCK] finalize_batch: Acquiring last_uploaded_batch_block lock to update for block {}", block_number);
             let mut last_uploaded_batch_block = self.last_uploaded_batch_block.lock().await;
             // update last uploaded batch block
             *last_uploaded_batch_block = block_number;
             info!(
-                "Batch Finalizer: Last uploaded batch block updated to: {}. Lock unlocked",
+                "[LOCK] finalize_batch: Last uploaded batch block updated to: {} and releasing lock",
                 block_number
             );
         }
@@ -1504,10 +1533,15 @@ impl Batcher {
         {
             let new_disable_verifiers = disable_verifiers
                 .map_err(|e| BatcherError::DisabledVerifiersError(e.to_string()))?;
+            info!("[LOCK] handle_new_block: Acquiring disabled_verifiers lock to check for changes for block {}", block_number);
             let mut disabled_verifiers_lock = self.disabled_verifiers.lock().await;
             if new_disable_verifiers != *disabled_verifiers_lock {
+                info!("[LOCK] handle_new_block: Disabled verifiers changed, updating and flushing queue for block {}", block_number);
                 *disabled_verifiers_lock = new_disable_verifiers;
+                info!("[LOCK] handle_new_block: Released disabled_verifiers lock after update for block {}", block_number);
                 self.flush_queue_and_clear_nonce_cache().await;
+            } else {
+                info!("[LOCK] handle_new_block: Released disabled_verifiers lock (no changes) for block {}", block_number);
             }
         }
 
@@ -1520,8 +1554,10 @@ impl Batcher {
                 .await;
 
             // Resetting this here to avoid doing it on every return path of `finalize_batch` function
+            info!("[LOCK] handle_new_block: Acquiring posting_batch lock to reset flag for block {}", block_number);
             let mut batch_posting = self.posting_batch.lock().await;
             *batch_posting = false;
+            info!("[LOCK] handle_new_block: Reset posting_batch flag to false and released lock for block {}", block_number);
 
             batch_finalization_result?;
         }
