@@ -1,14 +1,18 @@
+use std::sync::OnceLock;
 use lazy_static::lazy_static;
 use log::{error, warn};
 use sp1_sdk::{ProverClient, EnvProver, SP1ProofWithPublicValues};
 
-lazy_static! {
-    static ref PROVER_CLIENT: EnvProver = unsafe{
-        std::env::set_var("SP1_DISABLE_PROGRAM_CACHE", "1");
-        std::env::set_var("PROVER_CORE_CACHE_SIZE", "1");
-        ProverClient::from_env()
-    };
-}
+// lazy_static! {
+//     static ref PROVER_CLIENT: EnvProver = unsafe{
+//         std::env::set_var("SP1_DISABLE_PROGRAM_CACHE", "1");
+//         std::env::set_var("PROVER_CORE_CACHE_SIZE", "1");
+//         ProverClient::from_env()
+//     };
+// }
+
+static PROVER_CLIENT: OnceLock<EnvProver> = OnceLock::new();
+
 
 fn inner_verify_sp1_proof_ffi(
     proof_bytes: *const u8,
@@ -33,13 +37,15 @@ fn inner_verify_sp1_proof_ffi(
         unsafe { std::slice::from_raw_parts(public_inputs_bytes, public_inputs_len as usize) };
     let elf_bytes = unsafe { std::slice::from_raw_parts(elf_bytes, elf_len as usize) };
 
+    let prover_client = PROVER_CLIENT.get_or_init(ProverClient::from_env);
+
     if let Ok(proof) = bincode::deserialize::<SP1ProofWithPublicValues>(proof_bytes) {
         if *proof.public_values.as_slice() != *public_inputs_bytes {
             warn!("SP1 public inputs do not match proof public values");
             return false;
         }
-        let (_pk, vk) = PROVER_CLIENT.setup(elf_bytes);
-        return PROVER_CLIENT.verify(&proof, &vk).is_ok();
+        let (_pk, vk) = prover_client.setup(elf_bytes);
+        return prover_client.verify(&proof, &vk).is_ok();
     }
 
     false
