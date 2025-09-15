@@ -1348,6 +1348,11 @@ impl Batcher {
         if self
             .is_verifier_disabled(verification_data.proving_system)
             .await
+            || verification_data.proving_system == ProvingSystemId::Risc0
+            || verification_data.proving_system == ProvingSystemId::GnarkGroth16Bn254
+            || verification_data.proving_system == ProvingSystemId::GnarkPlonkBn254
+            || verification_data.proving_system == ProvingSystemId::GnarkPlonkBls12_381
+            || verification_data.proving_system == ProvingSystemId::CircomGroth16Bn256
         {
             warn!(
                 "Verifier for proving system {} is disabled",
