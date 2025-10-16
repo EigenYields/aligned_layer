@@ -8,6 +8,14 @@ use log::{debug, warn};
 
 pub(crate) async fn verify(verification_data: &VerificationData) -> bool {
     let verification_data = verification_data.clone();
+    warn!(
+        "FIST 4 BYTES OF PROOF {:?}",
+        verification_data
+            .proof
+            .get(..4)
+            .map(|i| hex::encode(i))
+            .unwrap()
+    );
     tokio::task::spawn_blocking(move || verify_internal(&verification_data))
         .await
         .unwrap_or(false)

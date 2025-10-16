@@ -1159,6 +1159,10 @@ fn verification_data_from_args(args: &SubmitArgs) -> Result<VerificationData, Su
 
     // Read proof file
     let proof = read_file(args.proof_file_name.clone())?;
+    warn!(
+        "FIST 4 BYTES OF PROOF {:?}",
+        proof.get(..4).map(|i| hex::encode(i)).unwrap()
+    );
 
     let pub_input: Option<Vec<u8>>;
     let mut verification_key: Option<Vec<u8>> = None;

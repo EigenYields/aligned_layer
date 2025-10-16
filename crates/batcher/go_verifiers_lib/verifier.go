@@ -62,10 +62,15 @@ func gnarkProofLength(proofBytes []byte) (uint32, error) {
 	const HeaderSize = 4
 	r := bytes.NewReader(proofBytes)
 	var buf [HeaderSize]byte
-	if read, err := io.ReadFull(r, buf[:HeaderSize]); err != nil {
-		return uint32(read), err
+	_, err := io.ReadFull(r, buf[:HeaderSize])
+	if err != nil {
+		return 0, err
 	}
+
 	sliceLen := binary.BigEndian.Uint32(buf[:HeaderSize])
+
+	log.Printf("PROOF BYTES: %v", buf)
+	log.Printf("PROOF LEN: %v", sliceLen)
 	return sliceLen, nil
 }
 
@@ -75,7 +80,7 @@ func verifyGnarkPlonkProof(proofBytesRef C.ListRef, pubInputBytesRef C.ListRef, 
 	pubInputBytes := listRefToBytes(pubInputBytesRef)
 	verificationKeyBytes := listRefToBytes(verificationKeyBytesRef)
 
-	proofLength, err := gnarkProofLength(proofBytes)
+	_, err := gnarkProofLength(proofBytes)
 	if err != nil {
 		log.Printf("Could not determine proof length: %v", err)
 		return false

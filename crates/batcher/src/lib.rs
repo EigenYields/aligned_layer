@@ -1101,6 +1101,16 @@ impl Batcher {
         client_msg: Box<SubmitProofMessage>,
         ws_conn_sink: WsMessageSink,
     ) -> Result<(), Error> {
+        warn!(
+            "FIST 4 BYTES OF PROOF {:?}",
+            client_msg
+                .verification_data
+                .verification_data
+                .proof
+                .get(..4)
+                .map(|i| hex::encode(i))
+                .unwrap()
+        );
         let msg_nonce = client_msg.verification_data.nonce;
         debug!("Received message with nonce: {msg_nonce:?}");
         self.metrics.received_proofs.inc();
