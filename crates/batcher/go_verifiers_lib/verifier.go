@@ -80,7 +80,7 @@ func verifyGnarkPlonkProof(proofBytesRef C.ListRef, pubInputBytesRef C.ListRef, 
 	pubInputBytes := listRefToBytes(pubInputBytesRef)
 	verificationKeyBytes := listRefToBytes(verificationKeyBytesRef)
 
-	_, err := gnarkProofLength(proofBytes)
+	proofLength, err := gnarkProofLength(proofBytes)
 	if err != nil {
 		log.Printf("Could not determine proof length: %v", err)
 		return false
