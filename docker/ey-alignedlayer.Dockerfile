@@ -131,7 +131,8 @@ RUN cargo build ${RELEASE_FLAG} && \
 COPY --from=chef_builder /aligned_layer/operator/merkle_tree/lib/target/ /aligned_layer/operator/merkle_tree/lib/target/
 WORKDIR /aligned_layer/operator/merkle_tree/lib
 RUN cargo build ${RELEASE_FLAG} && \
-    cp target/${TARGET_REL_PATH}/libmerkle_tree.so ./libmerkle_tree.so
+    cp target/${TARGET_REL_PATH}/libmerkle_tree.so ./libmerkle_tree.so && \
+    cp target/${TARGET_REL_PATH}/libmerkle_tree.a ./libmerkle_tree.a
 
 # Build Go operator
 WORKDIR /aligned_layer
