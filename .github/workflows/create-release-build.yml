@@ -1,0 +1,123 @@
+name: Create Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream version tag (e.g., v0.21.0)'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ github.event.inputs.upstream_version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Version must be in format v0.0.0"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "EigenYields"
+          git config user.email "dev@eigenyields.io"
+
+      - name: Add upstream remote and fetch tags
+        run: |
+          git remote add upstream https://github.com/yetanotherco/aligned_layer.git || true
+          git fetch upstream --tags
+
+      - name: Check if upstream tag exists
+        run: |
+          if ! git rev-parse "${{ github.event.inputs.upstream_version }}" >/dev/null 2>&1; then
+            echo "Error: Tag ${{ github.event.inputs.upstream_version }} does not exist in upstream"
+            exit 1
+          fi
+          echo "Found upstream tag: ${{ github.event.inputs.upstream_version }}"
+
+      - name: Check if EY tag already exists
+        run: |
+          EY_TAG="${{ github.event.inputs.upstream_version }}-ey"
+          if git rev-parse "$EY_TAG" >/dev/null 2>&1; then
+            echo "Error: Tag $EY_TAG already exists"
+            exit 1
+          fi
+
+      - name: Create release branch from upstream tag
+        run: |
+          VERSION="${{ github.event.inputs.upstream_version }}"
+          BRANCH_NAME="release/${VERSION}-ey"
+          
+          # Create branch from upstream tag
+          git checkout -b "$BRANCH_NAME" "$VERSION"
+          
+          echo "Created branch $BRANCH_NAME from $VERSION"
+
+      - name: Copy Dockerfile and workflow from testnet
+        run: |
+          # Fetch the latest Dockerfile and workflow from testnet branch
+          git checkout origin/testnet -- docker/ey-alignedlayer.Dockerfile
+          git checkout origin/testnet -- .github/workflows/build-operator-image.yml
+          
+          echo "Copied Dockerfile and workflow from testnet"
+
+      - name: Commit and tag
+        run: |
+          VERSION="${{ github.event.inputs.upstream_version }}"
+          EY_TAG="${VERSION}-ey"
+          BRANCH_NAME="release/${VERSION}-ey"
+          
+          git add docker/ey-alignedlayer.Dockerfile .github/workflows/build-operator-image.yml
+          git commit -m "Add EY operator Dockerfile and CI workflow for ${VERSION}"
+          
+          # Create the EY tag
+          git tag "$EY_TAG"
+          
+          echo "Created tag $EY_TAG"
+
+      - name: Push branch and tag
+        run: |
+          VERSION="${{ github.event.inputs.upstream_version }}"
+          EY_TAG="${VERSION}-ey"
+          BRANCH_NAME="release/${VERSION}-ey"
+          
+          git push origin "$BRANCH_NAME"
+          git push origin "$EY_TAG"
+          
+          echo "✅ Pushed branch $BRANCH_NAME and tag $EY_TAG"
+          echo ""
+          echo "The build workflow should now be triggered automatically."
+          echo "Check: https://github.com/${{ github.repository }}/actions"
+
+      - name: Summary
+        run: |
+          VERSION="${{ github.event.inputs.upstream_version }}"
+          EY_TAG="${VERSION}-ey"
+          
+          echo "## Release Build Created! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Upstream Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| EY Tag | \`${EY_TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`release/${VERSION}-ey\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The operator images will be built and pushed to:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}/operator-testnet:${EY_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}/operator-mainnet:${EY_TAG}\`" >> $GITHUB_STEP_SUMMARY
+
